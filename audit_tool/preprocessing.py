@@ -4,6 +4,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from IPython.display import display
+from scipy.stats.mstats import winsorize
+from sklearn.preprocessing import OrdinalEncoder
+
 
 def load_data(filepath):
     """Load dataset from a CSV file."""
@@ -157,13 +160,28 @@ def treat_outliers(df, method='capping', threshold=1.5):
         
     return df_copy
 
+def winsorize_column(df, column, lower_quantile=0.0, upper_quantile=0.99):
+    """Apply winsorization to a single column."""
+    lower = df[column].quantile(lower_quantile)
+    upper = df[column].quantile(upper_quantile)
+    df[column] = df[column].clip(lower, upper)
+    return df
+
+def winsorize_columns(df, columns, limits=(0, 0.01)):
+    """Apply winsorization to specified columns."""
+    df_winsorized = df.copy()
+    for col in columns:
+        lower_lim, upper_lim = limits
+        df_winsorized[col] = winsorize(df[col], limits=(lower_lim, upper_lim))
+    return df_winsorized
+
+
 def encode_categoricals(df, encoding_type='onehot'):
     """
     Encode categorical variables.
     encoding_type: 'onehot' for One-Hot Encoding (default), 'ordinal' for Ordinal Encoding.
     """
-    from sklearn.preprocessing import OrdinalEncoder
-    
+
     cat_cols = df.select_dtypes(include=['object', 'category']).columns
     
     if encoding_type == 'onehot':
@@ -177,6 +195,61 @@ def encode_categoricals(df, encoding_type='onehot'):
     
     else:
         raise ValueError("encoding_type must be 'onehot' or 'ordinal'")
+    
+
+def encode_mixed_categoricals(df, ordinal_vars, onehot_vars):
+    """
+    Apply ordinal encoding to ordinal_vars and one-hot encoding to onehot_vars.
+    """
+    df_encoded = df.copy()
+
+    # Ordinal encoding
+    if ordinal_vars:
+        encoder = OrdinalEncoder()
+        df_encoded[ordinal_vars] = encoder.fit_transform(df_encoded[ordinal_vars])
+
+    # One-hot encoding
+    df_encoded = pd.get_dummies(df_encoded, columns=onehot_vars, drop_first=True)
+
+    return df_encoded
+
+def extract_date_features(df, date_cols):
+    """
+    Extract year and month from date columns and drop the original columns.
+    """
+    df_copy = df.copy()
+    for col in date_cols:
+        df_copy[col] = pd.to_datetime(df_copy[col], errors='coerce')
+        df_copy[f"{col}_year"] = df_copy[col].dt.year
+        df_copy[f"{col}_month"] = df_copy[col].dt.month
+    df_copy.drop(columns=date_cols, inplace=True)
+    return df_copy
+
+def scale_features(df, target_column=None):
+    """
+    Scale numerical features using StandardScaler.
+    If target_column is specified, it will be excluded from scaling.
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    df_scaled = df.copy()
+
+    if target_column and target_column in df_scaled.columns:
+        y = df_scaled[target_column]
+        X = df_scaled.drop(columns=[target_column])
+    else:
+        X = df_scaled
+        y = None
+
+    numeric_cols = X.select_dtypes(include=[np.number]).columns
+
+    scaler = StandardScaler()
+    X[numeric_cols] = scaler.fit_transform(X[numeric_cols])
+
+    if y is not None:
+        X[target_column] = y  # Reattach target unscaled
+
+    return X
 
 
 def save_processed_data(df, path):
