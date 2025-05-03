@@ -213,17 +213,27 @@ def encode_mixed_categoricals(df, ordinal_vars, onehot_vars):
 
     return df_encoded
 
-def extract_date_features(df, date_cols):
+def safe_extract_date_features(df, date_cols):
     """
-    Extract year and month from date columns and drop the original columns.
+    Safely extract year and month from date columns if possible.
+    If a column cannot be converted to datetime, it will be skipped.
     """
-    df_copy = df.copy()
+    df = df.copy()
     for col in date_cols:
-        df_copy[col] = pd.to_datetime(df_copy[col], errors='coerce')
-        df_copy[f"{col}_year"] = df_copy[col].dt.year
-        df_copy[f"{col}_month"] = df_copy[col].dt.month
-    df_copy.drop(columns=date_cols, inplace=True)
-    return df_copy
+        try:
+            # Try converting to datetime
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+            if df[col].notnull().any():
+                df[f"{col}_year"] = df[col].dt.year
+                df[f"{col}_month"] = df[col].dt.month
+                print(f"Processed date column: {col}")
+            else:
+                print(f"Column '{col}' has no valid dates. Skipping.")
+        except Exception as e:
+            print(f"Could not process column '{col}': {e}")
+
+    return df
+
 
 def scale_features(df, target_column=None):
     """
