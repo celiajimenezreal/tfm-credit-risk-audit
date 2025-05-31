@@ -5,7 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from IPython.display import display
 from scipy.stats.mstats import winsorize
-from sklearn.preprocessing import OrdinalEncoder
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.linear_model import LassoCV, RidgeCV
 
 
 def load_data(filepath):
@@ -271,3 +272,39 @@ def get_numerical_and_categorical_columns(df):
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
     return num_cols, cat_cols
+
+def lasso_ridge_feature_selection(df, target_column, model_type='lasso', alphas=np.logspace(-4, 4, 50)):
+    """
+    Perform feature selection using Lasso or Ridge regression.
+
+    Args:
+        df (pd.DataFrame): DataFrame including features and target.
+        target_column (str): Name of the target column.
+        model_type (str): 'lasso' or 'ridge'.
+        alphas (array): Array of alpha values for regularization.
+
+    Returns:
+        pd.Series: Model coefficients indexed by feature names.
+    """
+    df_copy = df.copy()
+    X = df_copy.drop(columns=[target_column])
+    y = df_copy[target_column]
+
+    # Use only numeric features
+    X = X.select_dtypes(include=[np.number])
+
+    # Standardize the features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    if model_type == 'lasso':
+        model = LassoCV(alphas=alphas, cv=5, max_iter=5000)
+    elif model_type == 'ridge':
+        model = RidgeCV(alphas=alphas, cv=5)
+    else:
+        raise ValueError("model_type must be either 'lasso' or 'ridge'")
+
+    model.fit(X_scaled, y)
+    coef = pd.Series(model.coef_, index=X.columns)
+
+    return coef
