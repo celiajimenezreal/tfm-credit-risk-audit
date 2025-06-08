@@ -6,12 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import lime
 import lime.lime_tabular
+from typing import Tuple, List
 
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
-
-import shap
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
@@ -263,3 +259,77 @@ def explain_instance_lime(
     exp.show_in_notebook()
 
     return exp
+
+
+def generate_audit_summary(
+    model_name: str,
+    shap_values: shap.Explanation,
+    X: pd.DataFrame,
+    top_n: int = 10,
+    suspicious_keywords: List[str] = None,
+    export_txt_path: str = None
+) -> Tuple[str, pd.DataFrame]:
+    """
+    Generate an audit summary for a model based on SHAP values and feature names.
+    """
+    if suspicious_keywords is None:
+        suspicious_keywords = ['id', 'key', 'number', 'rating', 'score', 'date']
+
+    # --- Detect binary classifier with 3D SHAP output ---
+    if isinstance(shap_values.values, list):
+        # If it's already separated by class, take class 1
+        shap_matrix = shap_values[1].values if isinstance(shap_values[1], shap.Explanation) else shap_values[1]
+    elif shap_values.values.ndim == 3:
+        # Shape: (n_samples, n_features, n_classes) → select class 1
+        shap_matrix = shap_values.values[:, :, 1]
+    else:
+        shap_matrix = shap_values.values
+
+
+    # Compute mean absolute SHAP value per feature
+    mean_abs_shap = np.abs(shap_matrix).mean(axis=0)
+
+    # Build DataFrame
+    feature_names = X.columns
+    if len(feature_names) != len(mean_abs_shap):
+        raise ValueError("Mismatch between number of features in X and SHAP values.")
+
+    shap_df = pd.DataFrame({
+        "Feature": feature_names,
+        "MeanAbsSHAP": mean_abs_shap
+    }).sort_values(by="MeanAbsSHAP", ascending=False).reset_index(drop=True)
+
+    top_features_df = shap_df.head(top_n)
+
+    # Detect suspicious features
+    suspicious_features = [
+        f for f in top_features_df["Feature"]
+        if any(kw.lower() in f.lower() for kw in suspicious_keywords)
+    ]
+
+    # Generate report
+    report_lines = [f"Audit Summary for Model: **{model_name}**\n"]
+    report_lines.append(f"Top {top_n} features by average absolute SHAP value:\n")
+
+    for i, row in top_features_df.iterrows():
+        report_lines.append(f"{i+1}. {row['Feature']}: {row['MeanAbsSHAP']:.4f}")
+
+    if suspicious_features:
+        report_lines.append("\nSuspicious or potentially problematic features detected:")
+        for feat in suspicious_features:
+            report_lines.append(f"- {feat} (possible ID, score, or leaked info)")
+
+        report_lines.append("\nRecommendation: Consider removing or reviewing these variables. "
+                            "They may introduce data leakage or reduce model robustness.")
+    else:
+        report_lines.append("\nNo suspicious features detected among top contributors.")
+
+    report_text = "\n".join(report_lines)
+
+    # Export if needed
+    if export_txt_path:
+        with open(export_txt_path, "w") as f:
+            f.write(report_text)
+
+    return report_text, top_features_df
+
