@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Explainability Report - {{ model_name }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1, h2, h3 { color: #333; }
+        img { max-width: 100%; height: auto; margin-bottom: 20px; }
+        .table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .table th, .table td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        .recommendations { background: #f9f9f9; padding: 15px; border-radius: 5px; }
+        .waterfall, .lime { margin-bottom: 30px; }
+    </style>
+</head>
+<body>
+    <h1>Explainability Report: {{ model_name }}</h1>
+
+    <h2>1. Global SHAP Explanation</h2>
+    <img src="data:image/png;base64,{{ shap_summary_img }}" alt="SHAP Summary">
+
+    {% if feature_table %}
+    <h2>2. Feature Importances</h2>
+    <img src="data:image/png;base64,{{ fi_plot }}" alt="Feature Importances">
+    <table class="table">
+        <thead>
+            <tr><th>Feature</th><th>Importance</th></tr>
+        </thead>
+        <tbody>
+        {% for row in feature_table %}
+            <tr>
+                <td>{{ row.feature }}</td>
+                <td>{{ '%.4f'|format(row.importance) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <h2>3. Local SHAP Explanations (Waterfall)</h2>
+    {% for wf in waterfalls %}
+    <div class="waterfall">
+        <h3>Instance {{ wf.idx }}</h3>
+        <img src="data:image/png;base64,{{ wf.img }}" alt="Waterfall {{ wf.idx }}">
+    </div>
+    {% endfor %}
+
+    <h2>4. Local LIME Explanations</h2>
+    <div class="lime">
+        {{ lime_explanations | safe }}
+    </div>
+
+    <h2>5. Recommendations and Potential Weaknesses</h2>
+    <div class="recommendations">
+        <ul>
+        {% for rec in recommendations %}
+            <li>{{ rec }}</li>
+        {% endfor %}
+        </ul>
+    </div>
+
+    <footer><p>Generated automatically.</p></footer>
+</body>
+</html>
