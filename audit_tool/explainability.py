@@ -12,6 +12,7 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 
+
 def compute_shap_values(model, X):
     """
     Compute SHAP values using the modern SHAP API.
