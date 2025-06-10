@@ -1,202 +1,197 @@
+'''
+robustness.py
+
+Adversarial Robustness Auditing Module with Per-Model Attack Evaluation and HTML/MD Report Generation
+
+This module includes robust handling for gradient-based and decision-based attacks, ensuring compatibility with all models.
+'''
+
 import os
 import numpy as np
 import pandas as pd
-from collections import defaultdict
-from art.estimators.classification import SklearnClassifier
-from art.attacks.evasion import (
-    FastGradientMethod,
-    ProjectedGradientDescent,
-    HopSkipJump,
-    BoundaryAttack
-)
+from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 
-def run_fgsm(model, X, eps):
+from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent, HopSkipJump
+from art.estimators.classification import SklearnClassifier, XGBoostClassifier
+from sklearn.metrics import accuracy_score, f1_score
+
+
+def load_data(X_path: str, y_path: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    df_X = pd.read_csv(X_path)
+    X_test = df_X.values
+    feature_names = df_X.columns.tolist()
+    y_test = pd.read_csv(y_path)['TARGET'].values
+    return X_test, y_test, feature_names
+
+
+def load_models(model_paths: Dict[str, str]) -> Dict[str, object]:
+    import joblib
+    return {name: joblib.load(path) for name, path in model_paths.items()}
+
+
+def wrap_art_classifiers(models: Dict[str, object]) -> Dict[str, object]:
+    wrapped = {}
+    for name, mdl in models.items():
+        if name in ['logreg', 'rf']:
+            wrapped[name] = SklearnClassifier(model=mdl)
+        elif name == 'xgb':
+            wrapped[name] = XGBoostClassifier(model=mdl)
+        else:
+            raise ValueError(f"Unsupported model: {name}")
+    return wrapped
+
+
+def generate_adversarial_examples(
+    classifier,
+    X: np.ndarray,
+    attack: str = 'fgsm',
+    eps: float = 0.1,
+    **kwargs
+) -> np.ndarray:
     """
-    Fast Gradient Sign Method (FGSM) attack.
+    Generate adversarial examples with FGSM/PGD; fallback to HopSkipJump if gradients unavailable.
+    Ensures classifier.input_shape and classifier.nb_classes are properly set.
     """
-    clf = SklearnClassifier(model=model, clip_values=(X.min(), X.max()))
-    attack = FastGradientMethod(estimator=clf, eps=eps)
-    return attack.generate(x=X)
+    # Ensure necessary attributes for gradient attacks
+    if getattr(classifier, 'input_shape', None) is None:
+        classifier.input_shape = (X.shape[1],)
+    if not hasattr(classifier, 'nb_classes') or classifier.nb_classes is None:
+        try:
+            preds = classifier.predict(X[:1])
+            classifier.nb_classes = preds.shape[1]
+        except Exception:
+            pass
+
+    # Try gradient-based attack
+    try:
+        if attack.lower() == 'fgsm':
+            atk = FastGradientMethod(estimator=classifier, eps=eps, **kwargs)
+        elif attack.lower() == 'pgd':
+            atk = ProjectedGradientDescent(estimator=classifier, eps=eps, **kwargs)
+        else:
+            raise ValueError(f"Unsupported attack: {attack}")
+        return atk.generate(x=X)
+    except Exception as e:
+        # Fallback to decision-based HopSkipJump
+        print(f"Gradient attack failed ({e}); using HopSkipJump for {type(classifier).__name__}.")
+        atk = HopSkipJump(classifier=classifier, max_iter=10, max_eval=100, init_eval=10)
+        return atk.generate(x=X)
 
 
-def run_pgd(model, X, eps, max_iter=40):
-    """
-    Projected Gradient Descent (PGD) attack.
-    """
-    clf = SklearnClassifier(model=model, clip_values=(X.min(), X.max()))
-    attack = ProjectedGradientDescent(estimator=clf, eps=eps, max_iter=max_iter)
-    return attack.generate(x=X)
+def evaluate_on_adversarial(
+    art_classifiers: Dict[str, object],
+    X_adv: np.ndarray,
+    y_true: np.ndarray
+) -> Dict[str, Dict[str, float]]:
+    summary = {}
+    for name, cls in art_classifiers.items():
+        preds = np.argmax(cls.predict(X_adv), axis=1)
+        summary[name] = {
+            'accuracy': accuracy_score(y_true, preds),
+            'f1_score': f1_score(y_true, preds)
+        }
+    return summary
 
 
-def run_hopskipjump(model, X, max_iter=50):
-    """
-    HopSkipJump decision-based attack.
-    """
-    clf = SklearnClassifier(model=model, clip_values=(X.min(), X.max()))
-    attack = HopSkipJump(classifier=clf, max_iter=max_iter)
-    return attack.generate(x=X)
+def analyze_perturbations(
+    X_orig: np.ndarray,
+    X_adv: np.ndarray,
+    feature_names: List[str],
+    top_k: int = 10
+) -> pd.DataFrame:
+    delta = np.abs(X_adv - X_orig)
+    mean_delta = delta.mean(axis=0)
+    df = pd.DataFrame({'feature': feature_names, 'mean_perturbation': mean_delta})
+    df = df.sort_values('mean_perturbation', ascending=False).reset_index(drop=True)
+    df['rank'] = df.index + 1
+    return df.head(top_k)
 
 
-def run_boundary(model, X, max_iter=50):
-    """
-    Boundary Attack (decision-based).
-    """
-    clf = SklearnClassifier(model=model, clip_values=(X.min(), X.max()))
-    attack = BoundaryAttack(classifier=clf, max_iter=max_iter)
-    return attack.generate(x=X)
+def plot_attack_results_single(
+    model_name: str,
+    metrics: Dict[str, float],
+    eps: float,
+    save_path: str
+) -> None:
+    plt.figure()
+    plt.bar(['accuracy', 'f1_score'], [metrics['accuracy'], metrics['f1_score']])
+    plt.title(f'{model_name} Performance under FGSM (eps={eps})')
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
 
 
-# Mapping of attack names to functions
-_attack_funcs = {
-    "fgsm": run_fgsm,
-    "pgd": run_pgd,
-    "hopskipjump": run_hopskipjump,
-    "boundary": run_boundary
-}
-
-def run_robustness(models, X, y, attacks, epsilons, output_dir=None):
-    """
-    Run adversarial attacks on a set of models and return robustness metrics.
-
-    Parameters:
-    - models: dict of {model_name: estimator}
-    - X: np.array of input features
-    - y: np.array of true labels
-    - attacks: list of attack names (keys in _attack_funcs)
-    - epsilons: list of epsilons for white-box attacks
-    - output_dir: if provided, CSV of results is saved here
-
-    Returns:
-    - df: pandas.DataFrame with columns [model, attack, eps, success_rate, avg_distortion]
-    - adv_examples: dict mapping (model, attack, eps) to list of (X_orig, X_adv, success_mask)
-    """
-    results = []
-    adv_examples = defaultdict(list)
-
-    for m_name, model in models.items():
-        for atk in attacks:
-            fn = _attack_funcs.get(atk)
-            if fn is None:
-                continue
-            # Determine epsilon list
-            eps_list = epsilons if atk in ("fgsm", "pgd") else [None]
-
-            for eps in eps_list:
-                print(f"▶ Running {atk} on {m_name} (eps={eps})")
-                # Generate adversarial examples
-                if eps is not None:
-                    X_adv = fn(model, X, eps=eps)
-                else:
-                    X_adv = fn(model, X)
-
-                # Predict and compute metrics
-                y_pred = model.predict(X_adv)
-                success_mask = (y_pred != y)
-                success_rate = success_mask.mean()
-                avg_dist = np.mean(np.linalg.norm(X_adv - X, axis=1))
-
-                results.append({
-                    "model": m_name,
-                    "attack": atk,
-                    "eps": eps,
-                    "success_rate": success_rate,
-                    "avg_distortion": avg_dist
-                })
-
-                # Store examples for feature analysis
-                adv_examples[(m_name, atk, eps)].append((X, X_adv, success_mask))
-
-    df = pd.DataFrame(results)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        df.to_csv(os.path.join(output_dir, "robustness_results.csv"), index=False)
-    return df, adv_examples
+def plot_feature_perturbations(
+    df_pert: pd.DataFrame,
+    save_path: str
+) -> None:
+    plt.figure()
+    plt.barh(df_pert['feature'][::-1], df_pert['mean_perturbation'][::-1])
+    plt.xlabel('Mean Perturbation')
+    plt.title('Top Feature Perturbations')
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
 
 
-def analyze_feature_vulnerability(adv_examples, feature_names, top_k=5):
-    """
-    Analyze which features are most frequently changed in successful adversarial examples.
+def generate_report(
+    X_orig: np.ndarray,
+    y_true: np.ndarray,
+    art_clfs: Dict[str, object],
+    epsilons: List[float],
+    feature_names: List[str],
+    figures_dir: str,
+    report_path: str,
+    fmt: str = 'html'
+) -> None:
+    os.makedirs(figures_dir, exist_ok=True)
+    results_summary: Dict[float, Dict[str, Dict[str, float]]] = {}
+    perturb_summary: Dict[float, Dict[str, pd.DataFrame]] = {}
 
-    Parameters:
-    - adv_examples: dict from run_robustness
-    - feature_names: list of feature column names
-    - top_k: number of top features to return per attack
+    for eps in epsilons:
+        results_summary[eps] = {}
+        perturb_summary[eps] = {}
+        for name, cls in art_clfs.items():
+            X_adv = generate_adversarial_examples(cls, X_orig, attack='fgsm', eps=eps)
+            metrics = evaluate_on_adversarial({name: cls}, X_adv, y_true)[name]
+            results_summary[eps][name] = metrics
+            df_top = analyze_perturbations(X_orig, X_adv, feature_names)
+            perturb_summary[eps][name] = df_top
 
-    Returns:
-    - vuln: dict mapping (model, attack, eps) to list of (feature_name, count)
-    """
-    vuln = {}
-    n_features = len(feature_names)
+            perf_path = os.path.join(figures_dir, f'{name}_attack_perf_eps_{eps}.png')
+            plot_attack_results_single(name, metrics, eps, perf_path)
+            pert_path = os.path.join(figures_dir, f'{name}_feat_pert_eps_{eps}.png')
+            plot_feature_perturbations(df_top, pert_path)
 
-    for key, examples in adv_examples.items():
-        counts = np.zeros(n_features, dtype=int)
-        for X_orig, X_adv, mask in examples:
-            Xo = X_orig[mask]
-            Xa = X_adv[mask]
-            # Detect changes per feature
-            diffs = np.abs(Xa - Xo) > 1e-8
-            counts += diffs.sum(axis=0)
-
-        # Get top_k features
-        top_idx = np.argsort(-counts)[:top_k]
-        vuln[key] = [(feature_names[i], int(counts[i])) for i in top_idx]
-
-    return vuln
-
-def plot_robustness(df, output_dir=None):
-    """
-    Plot robustness curves (success rate vs epsilon) for each model and attack.
-
-    Parameters:
-    - df: DataFrame from run_robustness
-    - output_dir: if provided, saves plots in this directory
-    """
-    for m in df['model'].unique():
-        plt.figure()
-        sub = df[df['model'] == m]
-        for atk in sub['attack'].unique():
-            part = sub[sub['attack'] == atk]
-            eps_vals = part['eps'].fillna(0)
-            plt.plot(eps_vals, part['success_rate'], marker='o', label=atk)
-        plt.title(f"Robustness: {m}")
-        plt.xlabel("ε")
-        plt.ylabel("Success Rate")
-        plt.legend()
-        plt.grid(True)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            plt.savefig(os.path.join(output_dir, f"{m}_robustness.png"))
-        plt.show()
-
-
-
-def generate_markdown_report(df, vuln, output_path):
-    """
-    Generate a Markdown report summarizing robustness results and vulnerabilities.
-
-    Parameters:
-    - df: DataFrame from run_robustness
-    - vuln: output from analyze_feature_vulnerability
-    - output_path: file path for the .md report
-    """
-    with open(output_path, "w") as f:
-        f.write("# Informe de Robustez Adversarial\n\n")
-        f.write("## 1. Resumen de Robustez\n\n")
-        f.write(df.to_markdown(index=False))
-        f.write("\n\n")
-
-        f.write("## 2. Variables Más Vulnerables\n\n")
-        for (model, attack, eps), features in vuln.items():
-            title = f"### Modelo: **{model}**, Ataque: **{attack}**, ε = {eps}"
-            f.write(f"{title}\n\n")
-            f.write("| Variable | Veces modificada |\n")
-            f.write("|:---------|-----------------:|\n")
-            for var, cnt in features:
-                f.write(f"| {var} | {cnt} |\n")
-            f.write("\n")
-
-        f.write("## 3. Recomendaciones Generales\n\n")
-        f.write("- **Adversarial training**: incluye ejemplos adversariales en el entrenamiento.\n")
-        f.write("- **Regularización de gradiente**: penaliza altas sensibilidades.\n")
-        f.write("- **Detectores de anomalías**: filtra inputs con cambios atípicos en variables críticas.\n")
+    if fmt == 'html':
+        with open(report_path, 'w') as f:
+            f.write('<html><head><title>Robustness Audit</title></head><body>')
+            f.write('<h1>Adversarial Robustness Audit</h1>')
+            for eps in epsilons:
+                f.write(f'<h2>FGSM Attack (eps={eps})</h2>')
+                for name in art_clfs.keys():
+                    metrics = results_summary[eps][name]
+                    f.write(f'<h3>Model: {name}</h3>')
+                    #f.write(f'<p>Accuracy: {metrics["accuracy"]:.3f}, F1: {metrics["f1_score"]:.3f}</p>')
+                    perf_img = os.path.join(figures_dir, f'{name}_attack_perf_eps_{eps}.png')
+                    pert_img = os.path.join(figures_dir, f'{name}_feat_pert_eps_{eps}.png')
+                    f.write(f'<img src="{perf_img}" alt="Perf {name} eps={eps}"><br>')
+                    f.write(f'<img src="{pert_img}" alt="Pert {name} eps={eps}"><br>')
+                    f.write(perturb_summary[eps][name].to_html(index=False))
+            f.write('</body></html>')
+    else:
+        with open(report_path, 'w') as f:
+            f.write('# Adversarial Robustness Audit Report\n')
+            for eps in epsilons:
+                f.write(f'## FGSM Attack (eps={eps})\n')
+                for name in art_clfs.keys():
+                    metrics = results_summary[eps][name]
+                    f.write(f'### Model: {name}\n')
+                    #f.write(f'- Accuracy: {metrics['accuracy']:.3f}, F1: {metrics['f1_score']:.3f}\n')
+                    perf_img = os.path.join(figures_dir, f'{name}_attack_perf_eps_{eps}.png')
+                    pert_img = os.path.join(figures_dir, f'{name}_feat_pert_eps_{eps}.png')
+                    f.write(f'![Perf]({perf_img})\n')
+                    f.write(f'![Pert]({pert_img})\n')
+                    f.write(perturb_summary[eps][name].to_markdown(index=False) + '\n')
+    print(f'Report saved to {report_path}')
