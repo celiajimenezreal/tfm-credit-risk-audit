@@ -1,12 +1,4 @@
-'''
-robustness.py
-
-Adversarial Robustness Auditing Module with Per-Model Attack Evaluation and HTML/MD Report Generation
-
-This module includes robust handling for gradient-based and decision-based attacks, ensuring compatibility with all models.
-'''
-
-import os
+import os 
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple
@@ -49,21 +41,14 @@ def generate_adversarial_examples(
     eps: float = 0.1,
     **kwargs
 ) -> np.ndarray:
-    """
-    Generate adversarial examples with FGSM/PGD; fallback to HopSkipJump if gradients unavailable.
-    Ensures classifier.input_shape and classifier.nb_classes are properly set.
-    """
-    # Ensure necessary attributes for gradient attacks
-    if getattr(classifier, 'input_shape', None) is None:
-        classifier.input_shape = (X.shape[1],)
-    if not hasattr(classifier, 'nb_classes') or classifier.nb_classes is None:
+    # Ensure shape & classes
+    if getattr(classifier, '_input_shape', None) is None:
+        classifier._input_shape = (X.shape[1],)
+    if getattr(classifier, '_nb_classes', None) is None:
         try:
-            preds = classifier.predict(X[:1])
-            classifier.nb_classes = preds.shape[1]
+            classifier._nb_classes = classifier.predict(X[:1]).shape[1]
         except Exception:
             pass
-
-    # Try gradient-based attack
     try:
         if attack.lower() == 'fgsm':
             atk = FastGradientMethod(estimator=classifier, eps=eps, **kwargs)
@@ -72,9 +57,8 @@ def generate_adversarial_examples(
         else:
             raise ValueError(f"Unsupported attack: {attack}")
         return atk.generate(x=X)
-    except Exception as e:
-        # Fallback to decision-based HopSkipJump
-        print(f"Gradient attack failed ({e}); using HopSkipJump for {type(classifier).__name__}.")
+    except Exception:
+        # Decision-based fallback
         atk = HopSkipJump(classifier=classifier, max_iter=10, max_eval=100, init_eval=10)
         return atk.generate(x=X)
 
@@ -84,14 +68,14 @@ def evaluate_on_adversarial(
     X_adv: np.ndarray,
     y_true: np.ndarray
 ) -> Dict[str, Dict[str, float]]:
-    summary = {}
+    results = {}
     for name, cls in art_classifiers.items():
         preds = np.argmax(cls.predict(X_adv), axis=1)
-        summary[name] = {
+        results[name] = {
             'accuracy': accuracy_score(y_true, preds),
             'f1_score': f1_score(y_true, preds)
         }
-    return summary
+    return results
 
 
 def analyze_perturbations(
@@ -148,50 +132,105 @@ def generate_report(
     os.makedirs(figures_dir, exist_ok=True)
     results_summary: Dict[float, Dict[str, Dict[str, float]]] = {}
     perturb_summary: Dict[float, Dict[str, pd.DataFrame]] = {}
+    # Prepare XGB sample and baseline storage
+    xgb_data: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    baseline_metrics: Dict[str, Dict[str, float]] = {}
 
+    # Subsample once for each XGB model
+    for name, cls in art_clfs.items():
+        if isinstance(cls, XGBoostClassifier):
+            idx = np.random.choice(len(X_orig), size=min(500, len(X_orig)), replace=False)
+            X_sub, y_sub = X_orig[idx], y_true[idx]
+            cls._input_shape = (X_sub.shape[1],)
+            cls._nb_classes = len(np.unique(y_sub))
+            xgb_data[name] = (X_sub, y_sub)
+
+    # Iterate over epsilons
     for eps in epsilons:
         results_summary[eps] = {}
         perturb_summary[eps] = {}
         for name, cls in art_clfs.items():
-            X_adv = generate_adversarial_examples(cls, X_orig, attack='fgsm', eps=eps)
-            metrics = evaluate_on_adversarial({name: cls}, X_adv, y_true)[name]
+            # Determine data
+            if isinstance(cls, XGBoostClassifier):
+                X_use, y_use = xgb_data[name]
+                if eps == 0.0:
+                    X_adv = X_use.copy()
+                else:
+                    print(f"Running HopSkipJump for {name}, eps={eps}")
+                    atk = HopSkipJump(classifier=cls, max_iter=10, max_eval=100, init_eval=10)
+                    X_adv = atk.generate(x=X_use)
+            else:
+                X_use, y_use = X_orig, y_true
+                X_adv = generate_adversarial_examples(cls, X_use, attack='fgsm', eps=eps)
+
+            # Evaluate
+            metrics = evaluate_on_adversarial({name: cls}, X_adv, y_use)[name]
+            # Save baseline metrics
+            if eps == 0.0:
+                baseline_metrics[name] = metrics
+            # Perturbation analysis
+            df_top = analyze_perturbations(X_use, X_adv, feature_names)
+
             results_summary[eps][name] = metrics
-            df_top = analyze_perturbations(X_orig, X_adv, feature_names)
             perturb_summary[eps][name] = df_top
 
+            # Save plots
             perf_path = os.path.join(figures_dir, f'{name}_attack_perf_eps_{eps}.png')
-            plot_attack_results_single(name, metrics, eps, perf_path)
             pert_path = os.path.join(figures_dir, f'{name}_feat_pert_eps_{eps}.png')
+            plot_attack_results_single(name, metrics, eps, perf_path)
             plot_feature_perturbations(df_top, pert_path)
 
+    # Generate HTML report
     if fmt == 'html':
-        with open(report_path, 'w') as f:
-            f.write('<html><head><title>Robustness Audit</title></head><body>')
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write('<html><head><meta charset="utf-8"><title>Robustness Audit</title></head><body>')
             f.write('<h1>Adversarial Robustness Audit</h1>')
             for eps in epsilons:
                 f.write(f'<h2>FGSM Attack (eps={eps})</h2>')
                 for name in art_clfs.keys():
                     metrics = results_summary[eps][name]
+                    df_top = perturb_summary[eps][name]
                     f.write(f'<h3>Model: {name}</h3>')
-                    #f.write(f'<p>Accuracy: {metrics["accuracy"]:.3f}, F1: {metrics["f1_score"]:.3f}</p>')
+                    f.write('<p>')
+                    f.write(f'<strong>Accuracy:</strong> {metrics["accuracy"]:.3f}<br>')
+                    f.write(f'<strong>F1 score:</strong> {metrics["f1_score"]:.3f}')
+                    f.write('</p>')
                     perf_img = os.path.join(figures_dir, f'{name}_attack_perf_eps_{eps}.png')
                     pert_img = os.path.join(figures_dir, f'{name}_feat_pert_eps_{eps}.png')
-                    f.write(f'<img src="{perf_img}" alt="Perf {name} eps={eps}"><br>')
-                    f.write(f'<img src="{pert_img}" alt="Pert {name} eps={eps}"><br>')
-                    f.write(perturb_summary[eps][name].to_html(index=False))
+                    f.write(f'<img src="{perf_img}" alt="Perf"><br>')
+                    f.write(f'<img src="{pert_img}" alt="Pert"><br>')
+                    f.write(df_top.to_html(index=False))
+                    # Add findings for eps > 0
+                    if eps > 0.0:
+                        base = baseline_metrics[name]
+                        delta_acc = base['accuracy'] - metrics['accuracy']
+                        delta_f1 = base['f1_score'] - metrics['f1_score']
+                        top_feats = df_top['feature'].tolist()[:3]
+                        f.write('<h4>Findings</h4>')
+                        f.write('<ul>')
+                        f.write(f'<li>Accuracy drop vs. baseline: {delta_acc:.2%}.</li>')
+                        f.write(f'<li>F1 score drop vs. baseline: {delta_f1:.2%}.</li>')
+                        f.write(f'<li>Top sensitive features: {", ".join(top_feats)}.</li>')
+                        f.write('</ul>')
+                        f.write('<h4>Recommendations</h4>')
+                        f.write('<ul>')
+                        f.write('<li>Consider adversarial training (PGD) to bolster robustness.</li>')
+                        f.write('<li>Regularize or remove high-perturbation features.</li>')
+                        f.write('<li>Evaluate ensemble models and robust loss functions.</li>')
+                        f.write('</ul>')
+                    f.write('<hr>')
             f.write('</body></html>')
     else:
-        with open(report_path, 'w') as f:
+        # Markdown fallback
+        with open(report_path, 'w', encoding='utf-8') as f:
             f.write('# Adversarial Robustness Audit Report\n')
             for eps in epsilons:
                 f.write(f'## FGSM Attack (eps={eps})\n')
                 for name in art_clfs.keys():
                     metrics = results_summary[eps][name]
+                    df_top = perturb_summary[eps][name]
                     f.write(f'### Model: {name}\n')
-                    #f.write(f'- Accuracy: {metrics['accuracy']:.3f}, F1: {metrics['f1_score']:.3f}\n')
-                    perf_img = os.path.join(figures_dir, f'{name}_attack_perf_eps_{eps}.png')
-                    pert_img = os.path.join(figures_dir, f'{name}_feat_pert_eps_{eps}.png')
-                    f.write(f'![Perf]({perf_img})\n')
-                    f.write(f'![Pert]({pert_img})\n')
-                    f.write(perturb_summary[eps][name].to_markdown(index=False) + '\n')
-    print(f'Report saved to {report_path}')
+                    f.write(f'- Accuracy: {metrics["accuracy"]:.3f}\n')
+                    f.write(f'- F1 score: {metrics["f1_score"]:.3f}\n')
+                    f.write(df_top.to_markdown(index=False) + '\n')
+    print(f'Report saved to {report_path}') 
