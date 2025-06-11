@@ -1,236 +1,128 @@
-import os 
+# audit_tool/robustness.py
+
+import os
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 
-from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent, HopSkipJump
-from art.estimators.classification import SklearnClassifier, XGBoostClassifier
-from sklearn.metrics import accuracy_score, f1_score
+from art.estimators.classification import SklearnClassifier
+from art.estimators.classification.xgboost import XGBoostClassifier
+from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent
+from sklearn.base import ClassifierMixin
+from sklearn.utils import shuffle
+from joblib import load
+from typing import Union
 
+def ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
 
-def load_data(X_path: str, y_path: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    df_X = pd.read_csv(X_path)
-    X_test = df_X.values
-    feature_names = df_X.columns.tolist()
-    y_test = pd.read_csv(y_path)['TARGET'].values
-    return X_test, y_test, feature_names
-
-
-def load_models(model_paths: Dict[str, str]) -> Dict[str, object]:
-    import joblib
-    return {name: joblib.load(path) for name, path in model_paths.items()}
-
-
-def wrap_art_classifiers(models: Dict[str, object]) -> Dict[str, object]:
-    wrapped = {}
-    for name, mdl in models.items():
-        if name in ['logreg', 'rf']:
-            wrapped[name] = SklearnClassifier(model=mdl)
-        elif name == 'xgb':
-            wrapped[name] = XGBoostClassifier(model=mdl)
-        else:
-            raise ValueError(f"Unsupported model: {name}")
-    return wrapped
-
-
-def generate_adversarial_examples(
-    classifier,
-    X: np.ndarray,
-    attack: str = 'fgsm',
-    eps: float = 0.1,
-    **kwargs
-) -> np.ndarray:
-    # Ensure shape & classes
-    if getattr(classifier, '_input_shape', None) is None:
-        classifier._input_shape = (X.shape[1],)
-    if getattr(classifier, '_nb_classes', None) is None:
-        try:
-            classifier._nb_classes = classifier.predict(X[:1]).shape[1]
-        except Exception:
-            pass
-    try:
-        if attack.lower() == 'fgsm':
-            atk = FastGradientMethod(estimator=classifier, eps=eps, **kwargs)
-        elif attack.lower() == 'pgd':
-            atk = ProjectedGradientDescent(estimator=classifier, eps=eps, **kwargs)
-        else:
-            raise ValueError(f"Unsupported attack: {attack}")
-        return atk.generate(x=X)
-    except Exception:
-        # Decision-based fallback
-        atk = HopSkipJump(classifier=classifier, max_iter=10, max_eval=100, init_eval=10)
-        return atk.generate(x=X)
-
-
-def evaluate_on_adversarial(
-    art_classifiers: Dict[str, object],
-    X_adv: np.ndarray,
-    y_true: np.ndarray
-) -> Dict[str, Dict[str, float]]:
-    results = {}
-    for name, cls in art_classifiers.items():
-        preds = np.argmax(cls.predict(X_adv), axis=1)
-        results[name] = {
-            'accuracy': accuracy_score(y_true, preds),
-            'f1_score': f1_score(y_true, preds)
-        }
-    return results
-
-
-def analyze_perturbations(
-    X_orig: np.ndarray,
-    X_adv: np.ndarray,
-    feature_names: List[str],
-    top_k: int = 10
-) -> pd.DataFrame:
-    delta = np.abs(X_adv - X_orig)
-    mean_delta = delta.mean(axis=0)
-    df = pd.DataFrame({'feature': feature_names, 'mean_perturbation': mean_delta})
-    df = df.sort_values('mean_perturbation', ascending=False).reset_index(drop=True)
-    df['rank'] = df.index + 1
-    return df.head(top_k)
-
-
-def plot_attack_results_single(
-    model_name: str,
-    metrics: Dict[str, float],
-    eps: float,
-    save_path: str
-) -> None:
-    plt.figure()
-    plt.bar(['accuracy', 'f1_score'], [metrics['accuracy'], metrics['f1_score']])
-    plt.title(f'{model_name} Performance under FGSM (eps={eps})')
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-
-
-def plot_feature_perturbations(
-    df_pert: pd.DataFrame,
-    save_path: str
-) -> None:
-    plt.figure()
-    plt.barh(df_pert['feature'][::-1], df_pert['mean_perturbation'][::-1])
-    plt.xlabel('Mean Perturbation')
-    plt.title('Top Feature Perturbations')
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-
-
-def generate_report(
-    X_orig: np.ndarray,
-    y_true: np.ndarray,
-    art_clfs: Dict[str, object],
-    epsilons: List[float],
-    feature_names: List[str],
-    figures_dir: str,
-    report_path: str,
-    fmt: str = 'html'
-) -> None:
-    os.makedirs(figures_dir, exist_ok=True)
-    results_summary: Dict[float, Dict[str, Dict[str, float]]] = {}
-    perturb_summary: Dict[float, Dict[str, pd.DataFrame]] = {}
-    # Prepare XGB sample and baseline storage
-    xgb_data: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
-    baseline_metrics: Dict[str, Dict[str, float]] = {}
-
-    # Subsample once for each XGB model
-    for name, cls in art_clfs.items():
-        if isinstance(cls, XGBoostClassifier):
-            idx = np.random.choice(len(X_orig), size=min(500, len(X_orig)), replace=False)
-            X_sub, y_sub = X_orig[idx], y_true[idx]
-            cls._input_shape = (X_sub.shape[1],)
-            cls._nb_classes = len(np.unique(y_sub))
-            xgb_data[name] = (X_sub, y_sub)
-
-    # Iterate over epsilons
-    for eps in epsilons:
-        results_summary[eps] = {}
-        perturb_summary[eps] = {}
-        for name, cls in art_clfs.items():
-            # Determine data
-            if isinstance(cls, XGBoostClassifier):
-                X_use, y_use = xgb_data[name]
-                if eps == 0.0:
-                    X_adv = X_use.copy()
-                else:
-                    print(f"Running HopSkipJump for {name}, eps={eps}")
-                    atk = HopSkipJump(classifier=cls, max_iter=10, max_eval=100, init_eval=10)
-                    X_adv = atk.generate(x=X_use)
-            else:
-                X_use, y_use = X_orig, y_true
-                X_adv = generate_adversarial_examples(cls, X_use, attack='fgsm', eps=eps)
-
-            # Evaluate
-            metrics = evaluate_on_adversarial({name: cls}, X_adv, y_use)[name]
-            # Save baseline metrics
-            if eps == 0.0:
-                baseline_metrics[name] = metrics
-            # Perturbation analysis
-            df_top = analyze_perturbations(X_use, X_adv, feature_names)
-
-            results_summary[eps][name] = metrics
-            perturb_summary[eps][name] = df_top
-
-            # Save plots
-            perf_path = os.path.join(figures_dir, f'{name}_attack_perf_eps_{eps}.png')
-            pert_path = os.path.join(figures_dir, f'{name}_feat_pert_eps_{eps}.png')
-            plot_attack_results_single(name, metrics, eps, perf_path)
-            plot_feature_perturbations(df_top, pert_path)
-
-    # Generate HTML report
-    if fmt == 'html':
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write('<html><head><meta charset="utf-8"><title>Robustness Audit</title></head><body>')
-            f.write('<h1>Adversarial Robustness Audit</h1>')
-            for eps in epsilons:
-                f.write(f'<h2>FGSM Attack (eps={eps})</h2>')
-                for name in art_clfs.keys():
-                    metrics = results_summary[eps][name]
-                    df_top = perturb_summary[eps][name]
-                    f.write(f'<h3>Model: {name}</h3>')
-                    f.write('<p>')
-                    f.write(f'<strong>Accuracy:</strong> {metrics["accuracy"]:.3f}<br>')
-                    f.write(f'<strong>F1 score:</strong> {metrics["f1_score"]:.3f}')
-                    f.write('</p>')
-                    perf_img = os.path.join(figures_dir, f'{name}_attack_perf_eps_{eps}.png')
-                    pert_img = os.path.join(figures_dir, f'{name}_feat_pert_eps_{eps}.png')
-                    f.write(f'<img src="{perf_img}" alt="Perf"><br>')
-                    f.write(f'<img src="{pert_img}" alt="Pert"><br>')
-                    f.write(df_top.to_html(index=False))
-                    # Add findings for eps > 0
-                    if eps > 0.0:
-                        base = baseline_metrics[name]
-                        delta_acc = base['accuracy'] - metrics['accuracy']
-                        delta_f1 = base['f1_score'] - metrics['f1_score']
-                        top_feats = df_top['feature'].tolist()[:3]
-                        f.write('<h4>Findings</h4>')
-                        f.write('<ul>')
-                        f.write(f'<li>Accuracy drop vs. baseline: {delta_acc:.2%}.</li>')
-                        f.write(f'<li>F1 score drop vs. baseline: {delta_f1:.2%}.</li>')
-                        f.write(f'<li>Top sensitive features: {", ".join(top_feats)}.</li>')
-                        f.write('</ul>')
-                        f.write('<h4>Recommendations</h4>')
-                        f.write('<ul>')
-                        f.write('<li>Consider adversarial training (PGD) to bolster robustness.</li>')
-                        f.write('<li>Regularize or remove high-perturbation features.</li>')
-                        f.write('<li>Evaluate ensemble models and robust loss functions.</li>')
-                        f.write('</ul>')
-                    f.write('<hr>')
-            f.write('</body></html>')
+def load_model(path: str, model_type: str):
+    model = load(path)
+    if model_type == 'xgb':
+        return XGBoostClassifier(model=model, nb_classes=2, clip_values=(0.0, 1.0))
     else:
-        # Markdown fallback
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write('# Adversarial Robustness Audit Report\n')
-            for eps in epsilons:
-                f.write(f'## FGSM Attack (eps={eps})\n')
-                for name in art_clfs.keys():
-                    metrics = results_summary[eps][name]
-                    df_top = perturb_summary[eps][name]
-                    f.write(f'### Model: {name}\n')
-                    f.write(f'- Accuracy: {metrics["accuracy"]:.3f}\n')
-                    f.write(f'- F1 score: {metrics["f1_score"]:.3f}\n')
-                    f.write(df_top.to_markdown(index=False) + '\n')
-    print(f'Report saved to {report_path}') 
+        return SklearnClassifier(model=model)
+
+def apply_fgsm(classifier, X, eps=0.1):
+    attack = FastGradientMethod(estimator=classifier, eps=eps)
+    X_adv = attack.generate(X)
+    return X_adv
+
+def apply_pgd(classifier, X, eps=0.1, eps_step=0.05, max_iter=20):
+    attack = ProjectedGradientDescent(estimator=classifier, eps=eps, eps_step=eps_step, max_iter=max_iter)
+    X_adv = attack.generate(X)
+    return X_adv
+
+def add_gaussian_noise(X, mean=0.0, std=0.1):
+    noise = np.random.normal(mean, std, X.shape)
+    return X + noise
+
+def boundary_testing(X, bounds=(0.0, 1.0)):
+    X_test = X.copy()
+    for i in range(X.shape[1]):
+        if np.random.rand() > 0.5:
+            X_test[:, i] = bounds[0]  # min value
+        else:
+            X_test[:, i] = bounds[1]  # max value
+    return X_test
+
+def flip_labels(y, flip_fraction=0.1):
+    y_flipped = y.copy()
+    n_flip = int(len(y) * flip_fraction)
+    indices = np.random.choice(len(y), size=n_flip, replace=False)
+    unique_classes = np.unique(y)
+    for i in indices:
+        other_classes = unique_classes[unique_classes != y[i]]
+        y_flipped[i] = np.random.choice(other_classes)
+    return y_flipped
+
+def safe_predict(clf, X):
+    y_pred = clf.predict(X)
+    if y_pred.ndim > 1 and y_pred.shape[1] > 1:
+        return np.argmax(y_pred, axis=1)
+    elif y_pred.ndim > 1 and y_pred.shape[1] == 1:
+        return (y_pred > 0.5).astype(int).ravel()
+    else:
+        return y_pred
+
+def evaluate_and_plot(model_name: str, y_true, y_pred, title: str, save_path: str):
+    from sklearn.metrics import classification_report, ConfusionMatrixDisplay
+
+    report = classification_report(y_true, y_pred, output_dict=True)
+    df_report = pd.DataFrame(report).transpose()
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ConfusionMatrixDisplay.from_predictions(y_true, y_pred, ax=ax, colorbar=False)
+    ax.set_title(title)
+
+    ensure_dir(os.path.dirname(save_path))
+    plt.savefig(save_path)
+    plt.close()
+
+    return df_report
+
+def run_robustness_tests(model_name: str, model_path: str, model_type: str,
+                          X: np.ndarray, y: np.ndarray,
+                          output_dir: str = "outputs/reports/robustness/figures"):
+
+    print(f"Running robustness tests for: {model_name}")
+
+    clf = load_model(model_path, model_type)
+    original_preds = safe_predict(clf, X)
+
+    # FGSM and PGD only for models that support gradients
+    if model_name in ["xgb", "logreg"]:
+        try:
+            # FGSM
+            fgsm_X = apply_fgsm(clf, X)
+            fgsm_preds = safe_predict(clf, fgsm_X)
+            evaluate_and_plot(model_name, y, fgsm_preds, "FGSM Attack",
+                              f"{output_dir}/{model_name}/fgsm_confmat.png")
+
+            # PGD
+            pgd_X = apply_pgd(clf, X)
+            pgd_preds = safe_predict(clf, pgd_X)
+            evaluate_and_plot(model_name, y, pgd_preds, "PGD Attack",
+                              f"{output_dir}/{model_name}/pgd_confmat.png")
+        except Exception as e:
+            print(f"Gradient-based attacks not supported for {model_name}: {e}")
+
+    # Gaussian noise
+    noisy_X = add_gaussian_noise(X)
+    noisy_preds = safe_predict(clf, noisy_X)
+    evaluate_and_plot(model_name, y, noisy_preds, "Gaussian Noise Injection",
+                      f"{output_dir}/{model_name}/noise_confmat.png")
+
+    # Boundary testing
+    bound_X = boundary_testing(X)
+    bound_preds = safe_predict(clf, bound_X)
+    evaluate_and_plot(model_name, y, bound_preds, "Boundary Testing",
+                      f"{output_dir}/{model_name}/boundary_confmat.png")
+
+    # Label flipping
+    flipped_y = flip_labels(y)
+    original_preds_yflip = safe_predict(clf, X)
+    evaluate_and_plot(model_name, flipped_y, original_preds_yflip, "Label Flipping",
+                      f"{output_dir}/{model_name}/label_flipping_confmat.png")
+
+    print(f"Finished robustness tests for: {model_name}")
