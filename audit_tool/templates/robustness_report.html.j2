@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Robustness Report - {{ model_name }}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            background-color: #f4f6f8;
+            color: #2c3e50;
+            margin: 0;
+            padding: 20px;
+        }
+        .section {
+            background: #ffffff;
+            padding: 25px;
+            margin-bottom: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+        }
+        h1 {
+            margin-bottom: 30px;
+        }
+        h2 {
+            margin-top: 0;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        .recommendations, .conclusions {
+            background: #ecf0f1;
+            padding: 15px;
+            border-left: 4px solid #c0392b;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        ul {
+            padding-left: 20px;
+        }
+        table {
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Robustness Report: {{ model_name }}</h1>
+
+<div class="section">
+    <h2>Test Summary Metrics</h2>
+    <table style="width:100%; border-collapse: collapse; text-align: left;">
+        <thead>
+            <tr style="background-color: #ecf0f1;">
+                <th style="padding: 10px; border-bottom: 2px solid #ccc;">Test</th>
+                <th style="padding: 10px; border-bottom: 2px solid #ccc;">Accuracy</th>
+                <th style="padding: 10px; border-bottom: 2px solid #ccc;">F1-Score</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for test in test_results %}
+            <tr>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd;">{{ test.name }}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd;">
+                    {{ '%.3f' % test.accuracy if test.accuracy is defined and test.accuracy is not none else 'N/A' }}
+                </td>
+                <td style="padding: 8px; border-bottom: 1px solid #ddd;">
+                    {{ '%.3f' % test.f1_score if test.f1_score is defined and test.f1_score is not none else 'N/A' }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% for test in test_results %}
+<div class="section">
+    <h2>{{ test.name }}</h2>
+
+    {% if test.description == "N/A" %}
+        <p><strong>Status:</strong> This test could not be executed for this model type. Possibly due to method incompatibility (e.g., tree-based models lacking gradients).</p>
+    {% else %}
+        <p><strong>Description:</strong> {{ test.description }}</p>
+        <p><strong>Methodology:</strong> {{ test.explanation }}</p>
+
+        {% if test.img_conf %}
+        <img src="data:image/png;base64,{{ test.img_conf }}" alt="Confusion matrix for {{ test.name }}">
+        {% endif %}
+
+        {% if test.img_pert %}
+        <h4 style="margin-top:20px;">Top Feature Perturbations</h4>
+        <img src="data:image/png;base64,{{ test.img_pert }}" alt="{{ test.name }} Perturbation Analysis">
+        {% endif %}
+    {% endif %}
+
+    {% if test.conclusions %}
+    <div class="conclusions">
+        <h4>Test-specific Conclusions</h4>
+        <ul>
+            {% for c in test.conclusions %}
+            <li>{{ c }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if test.recommendations %}
+    <div class="recommendations">
+        <h4>Recommendations</h4>
+        <ul>
+            {% for r in test.recommendations %}
+            <li>{{ r }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</div>
+{% endfor %}
+
+<div class="section">
+    <h2>Overall Conclusions</h2>
+    <div class="conclusions">
+        <ul>
+            {% for item in conclusions %}
+            <li>{{ item }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Overall Recommendations</h2>
+    <div class="recommendations">
+        <ul>
+            {% for rec in recommendations %}
+            <li>{{ rec }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+
+<footer>
+    <p style="font-size: 12px; color: #888; text-align: center;">Generated automatically.</p>
+</footer>
+
+</body>
+</html>

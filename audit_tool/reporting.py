@@ -14,6 +14,11 @@ from sklearn.metrics import brier_score_loss
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
+from audit_tool.robustness import (
+    load_model, apply_fgsm, apply_pgd, add_gaussian_noise,
+    boundary_testing, flip_labels, safe_predict, evaluate_and_plot, ensure_dir
+)
+from sklearn.metrics import accuracy_score, f1_score
 
 try:
     from statsmodels.stats.outliers_influence import variance_inflation_factor
@@ -29,12 +34,18 @@ TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
 TEMPLATE_FILE = 'explainability_report.html.j2'
 os.makedirs(REPORT_DIR, exist_ok=True)
 
+REPORT_DIR_2 = os.path.join(PROJECT_ROOT, 'outputs', 'reports', 'robustness')
+FIGURES_DIR_2 = os.path.join(REPORT_DIR_2, 'figures')
+TEMPLATE_FILE_2 = 'robustness_report.html.j2'
+os.makedirs(REPORT_DIR_2, exist_ok=True)
+
 # --- Jinja2 Template ---
 env = Environment(
     loader=FileSystemLoader(TEMPLATE_DIR),
     autoescape=select_autoescape(['html', 'xml'])
 )
 template = env.get_template(TEMPLATE_FILE)
+template_2 = env.get_template(TEMPLATE_FILE_2)
 
 # --- Utilidades ---
 def plot_to_base64():
@@ -75,7 +86,7 @@ def get_shap_explainer(model, X):
     else:
         return shap.KernelExplainer(model.predict_proba, X), shap.KernelExplainer(model.predict_proba, X)(X)
 
-def generate_report(model_name, model, X_train, X_test, y_test, instance_indices=None):
+def generate_explainability_report(model_name, model, X_train, X_test, y_test, instance_indices=None):
     instance_indices = instance_indices or [0, 10]
     suspicious_keywords = ['id', 'key', 'number', 'rating', 'score', 'date']
 
@@ -297,3 +308,214 @@ def generate_report(model_name, model, X_train, X_test, y_test, instance_indices
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(html)
     print(f"Report saved to {out_path}")
+
+def generate_robustness_report(model_name: str, model_path: str, model_type: str,
+                                X: np.ndarray, y: np.ndarray, feature_names: list) -> None:
+    clf = load_model(model_path, model_type)
+
+    conclusions, recommendations, tests_summary = [], [], []
+
+    def image_to_base64(path: str) -> str:
+        with open(path, 'rb') as f:
+            return base64.b64encode(f.read()).decode('utf-8')
+
+    def plot_top_deltas(X_orig, X_adv, test_name):
+        delta = np.abs(X_adv - X_orig)
+        mean_delta = delta.mean(axis=0)
+        df_delta = pd.DataFrame({'feature': feature_names, 'mean_delta': mean_delta})
+        df_delta = df_delta.sort_values('mean_delta', ascending=False).head(10)
+        plt.figure(figsize=(8, 4))
+        plt.barh(df_delta['feature'][::-1], df_delta['mean_delta'][::-1])
+        plt.title(f'Top Modified Features: {test_name}')
+        plt.tight_layout()
+        img_path = os.path.join(FIGURES_DIR_2, model_name, f"{test_name}_delta.png")
+        ensure_dir(os.path.dirname(img_path))
+        plt.savefig(img_path)
+        plt.close()
+        return image_to_base64(img_path), df_delta
+
+    def test_block(name, X_mod, y_mod, desc, explain, base_acc=None):
+        y_pred = safe_predict(clf, X_mod)
+        acc = accuracy_score(y_mod, y_pred)
+        f1 = f1_score(y_mod, y_pred)
+        img_path = os.path.join(FIGURES_DIR_2, model_name, f"{name}.png")
+        ensure_dir(os.path.dirname(img_path))
+        df_report = evaluate_and_plot(model_name, y_mod, y_pred, name, img_path)
+
+        test_entry = {
+            'name': name,
+            'description': desc,
+            'explanation': explain,
+            'accuracy': acc,
+            'f1_score': f1,
+            'img_conf': image_to_base64(img_path),
+            'conclusions': [],
+            'recommendations': []
+        }
+
+        # Solo generamos gráfico de perturbaciones si X fue modificado
+        if name not in ["Baseline Performance", "Label Noise Simulation"]:
+            delta_img, delta_df = plot_top_deltas(X, X_mod, name)
+            test_entry['img_pert'] = delta_img
+            test_entry['top_deltas'] = delta_df.head(5).to_dict(orient='records')
+
+            # Alta sensibilidad a alguna variable
+            if delta_df['mean_delta'].iloc[0] > 0.2:
+                msg = f"Model shows high sensitivity to feature: '{delta_df['feature'].iloc[0]}' during {name}."
+                conclusions.append(msg)
+                test_entry['conclusions'].append(msg)
+
+        # A partir de aquí, aplicamos diagnósticos a todo excepto baseline
+        if name != "Baseline Performance":
+            # Degradación significativa de accuracy
+            if base_acc is not None and acc < base_acc - 0.05:
+                msg = f"{name} significantly reduced accuracy (from {base_acc:.2f} to {acc:.2f})."
+                conclusions.append(msg)
+                test_entry['conclusions'].append(msg)
+
+            # F1-score completamente colapsado
+            if f1 == 0.0:
+                msg = f"Model completely failed to identify any positive (risky) cases under {name}. F1-score dropped to 0."
+                conclusions.append(msg)
+                test_entry['conclusions'].append(msg)
+                rec = f"Investigate decision boundary under {name}; model may need threshold adjustment or regularization to improve minority class detection."
+                recommendations.append(rec)
+                test_entry['recommendations'].append(rec)
+
+            # Accuracy crítico
+            if acc < 0.75:
+                rec = f"Accuracy under {name} is critically low ({acc:.2f}). Consider model retraining or improving data quality."
+                recommendations.append(rec)
+                test_entry['recommendations'].append(rec)
+
+        tests_summary.append(test_entry)
+        return acc, f1
+
+
+    ensure_dir(os.path.join(FIGURES_DIR_2, model_name))
+
+    # Baseline
+    base_acc, base_f1 = test_block(
+        "Baseline Performance",
+        X, y,
+        "Baseline test on original, clean data to benchmark model performance.",
+        "No attack applied. This test establishes the model's expected accuracy under normal, unperturbed conditions.",
+        base_acc=None
+    )
+
+    # FGSM
+    try:
+        X_fgsm = apply_fgsm(clf, X)
+        acc, f1 = test_block(
+            "FGSM Attack",
+            X_fgsm, y,
+            "FGSM introduces adversarial perturbations along the gradient of the loss function.",
+            "Fast Gradient Sign Method (ε=0.1) perturbs inputs in the direction of the gradient to cause misclassification with minimal modification.",
+            base_acc=base_acc
+        )
+        if acc < base_acc - 0.1:
+            rec = "Implement adversarial training strategies to improve defense against gradient-based attacks like FGSM."
+            recommendations.append(rec)
+            tests_summary[-1]['recommendations'].append(rec)
+        else:
+            conc = "Model maintained robust performance under FGSM, indicating resilience to simple gradient-based attacks."
+            conclusions.append(conc)
+            tests_summary[-1]['conclusions'].append(conc)
+    except Exception:
+        msg = "FGSM attack could not be applied. Possibly unsupported by the model."
+        conclusions.append(msg)
+        tests_summary.append({'name': "FGSM Attack", 'description': "N/A", 'conclusions': [msg], 'recommendations': []})
+
+    # PGD
+    try:
+        X_pgd = apply_pgd(clf, X)
+        acc, f1 = test_block(
+            "PGD Attack",
+            X_pgd, y,
+            "PGD is a stronger iterative adversarial attack based on FGSM.",
+            "Projected Gradient Descent (ε=0.1, α=0.01, 10 iterations) applies repeated FGSM steps with projection, testing the model’s resilience to stronger perturbations.",
+            base_acc=base_acc
+        )
+        if acc < base_acc - 0.15:
+            rec = "Consider robust optimization or certified defenses to mitigate stronger iterative attacks like PGD."
+            recommendations.append(rec)
+            tests_summary[-1]['recommendations'].append(rec)
+        else:
+            conc = "Model showed acceptable performance under PGD, suggesting moderate robustness to iterative adversarial attacks."
+            conclusions.append(conc)
+            tests_summary[-1]['conclusions'].append(conc)
+    except Exception:
+        msg = "PGD attack could not be applied. Possibly unsupported by the model."
+        conclusions.append(msg)
+        tests_summary.append({'name': "PGD Attack", 'description': "N/A", 'conclusions': [msg], 'recommendations': []})
+
+    # Gaussian Noise
+    X_noise = add_gaussian_noise(X)
+    acc, f1 = test_block(
+        "Gaussian Noise Injection",
+        X_noise, y,
+        "Test with additive Gaussian noise simulating sensor or measurement errors.",
+        "Applies Gaussian noise (mean=0, std=0.1) to each feature to evaluate how noise in inputs affects predictions.",
+        base_acc=base_acc
+    )
+    if acc < base_acc - 0.05:
+        rec = "Introduce data augmentation techniques or feature smoothing to mitigate noise sensitivity."
+        recommendations.append(rec)
+        tests_summary[-1]['recommendations'].append(rec)
+    else:
+        conc = "Model handled Gaussian noise well, indicating good generalization under noisy inputs."
+        conclusions.append(conc)
+        tests_summary[-1]['conclusions'].append(conc)
+
+    # Boundary Testing
+    X_bound = boundary_testing(X)
+    acc, f1 = test_block(
+        "Boundary Value Testing",
+        X_bound, y,
+        "Boundary value test forces features to extreme values.",
+        "For each feature, inputs are set to either their minimum or maximum observed value, probing edge-case behavior.",
+        base_acc=base_acc
+    )
+    if acc < base_acc - 0.05:
+        rec = "Ensure training data includes sufficient coverage of boundary values or apply regularization."
+        recommendations.append(rec)
+        tests_summary[-1]['recommendations'].append(rec)
+    else:
+        conc = "Model maintained stability under boundary value conditions, suggesting appropriate handling of extreme inputs."
+        conclusions.append(conc)
+        tests_summary[-1]['conclusions'].append(conc)
+
+    # Label Flipping
+    y_flipped = flip_labels(y)
+    acc, f1 = test_block(
+        "Label Noise Simulation",
+        X, y_flipped,
+        "Simulates label corruption by flipping 10% of class labels randomly.",
+        "This test does not modify features, only labels. It assesses robustness to errors in training or drift in label quality.",
+        base_acc=base_acc
+    )
+    if f1 < 0.6:
+        rec = "Explore robust loss functions (e.g., Huber loss) or label noise correction strategies."
+        recommendations.append(rec)
+        tests_summary[-1]['recommendations'].append(rec)
+    else:
+        conc = "Model demonstrated reasonable resistance to moderate label noise."
+        conclusions.append(conc)
+        tests_summary[-1]['conclusions'].append(conc)
+
+    # Render final HTML
+    env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=select_autoescape(['html']))
+    template = env.get_template('robustness_report.html.j2')
+
+    rendered = template.render(
+        model_name=model_name,
+        test_results=tests_summary,
+        conclusions=conclusions,
+        recommendations=recommendations
+    )
+
+    out_path = os.path.join(REPORT_DIR_2, f"{model_name}_robustness_report.html")
+    with open(out_path, 'w', encoding='utf-8') as f:
+        f.write(rendered)
+    print(f"Robustness report saved to {out_path}")
+
