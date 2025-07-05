@@ -4,12 +4,12 @@ Automated auditing tool for credit risk prediction models, evaluating explainabi
 
 ## Project Structure
 
-- `notebooks/`: Main notebook to run the full pipeline.
-- `audit_tool/`: Python modules for data processing, modeling, and auditing.
+- `notebooks/`: Main notebooks to run the tool.
+- `audit_tool/`: Python modules for data processing, modeling, and auditing (explainability and robustness).
 - `data/raw/`: Original, unprocessed datasets.
 - `data/processed/`: Datasets ready for modeling.
 - `models/`: Trained models and related artifacts.
-- `reports/`: Generated audit reports and result visualizations.
+- `outputs/`: Generated audit reports and result visualizations.
 
 ## Requirements
 
@@ -26,5 +26,8 @@ pip install -r requirements.txt
 
 With the virtual environment activated:
 
-- Open the main notebook located in `notebooks/main.ipynb`.
-- The notebook will call functions from the `audit_tool/` modules to handle data preprocessing, model training, and auditing.
+- Open the notebook for generating reports located in `notebooks/05_reporting.ipynb`.
+- The notebook will call functions from the `audit_tool/` modules to handle the auditing.
+
+There are also other modules and notebooks for data preprocessing and modelling over the 
+ProsperLoan dataset and notebooks for seeing individual tests regarding explainability and robustness.
