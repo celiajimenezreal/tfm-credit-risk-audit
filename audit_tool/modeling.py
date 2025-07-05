@@ -1,4 +1,40 @@
-# audit_tool/modeling.py
+"""
+audit_tool.modeling module
+---------------------------
+
+Provides functions for training, tuning, evaluating, and persisting
+machine learning classifiers including Logistic Regression, Random Forest,
+and XGBoost. Supports manual grid tuning, randomized search, early stopping,
+pipeline construction with preprocessing, and model evaluation metrics.
+
+Key Functions:
+    • train_logistic_regression: Simple Logistic Regression training
+    • train_logistic_regression_tuned: Pipeline + randomized hyperparameter search
+    • train_random_forest / train_random_forest_tuned: RF training with optional GridSearchCV
+    • train_xgboost / tune_xgboost / train_xgboost_tuned: XGBoost training and tuning
+    • evaluate_model: Generate classification report and ROC AUC
+    • evaluate_with_threshold: Custom threshold evaluation for top percentile
+    • save_model / load_model: Persist and load trained models
+
+Dependencies:
+    • pandas
+    • numpy
+    • scikit-learn
+    • xgboost
+    • joblib
+    • scipy
+
+Typical Usage:
+    from audit_tool.modeling import train_xgboost_tuned, evaluate_model
+    best_model, results_df = train_xgboost_tuned(X_train, y_train)
+    report, auc = evaluate_model(best_model, X_test, y_test)
+
+Author:
+    Celia Jiménez Real, University of Navarra – TFM Model Audit
+
+Date:
+    2025-07-05
+"""
 
 import pandas as pd
 import numpy as np
@@ -66,11 +102,10 @@ def train_logistic_regression_tuned(X_train, y_train, cv=5, n_iter=30):
         ('clf', LogisticRegression(max_iter=1000, solver='saga', tol=1e-3))
     ])
 
-    # Distribuciones continuas (log-uniform para C) y categorías
     param_dist = {
         'clf__penalty':     ['l1', 'l2', 'elasticnet'],
         'clf__C':           loguniform(1e-3, 1e2),
-        'clf__l1_ratio':    [0.2, 0.5, 0.8],      # solo para elasticnet
+        'clf__l1_ratio':    [0.2, 0.5, 0.8],     
         'clf__class_weight':['balanced', None],
     }
 
@@ -170,7 +205,6 @@ def train_xgboost_tuned(
       - best_model: el XGBClassifier con mejor AUC en validación interna.
       - results_df: DataFrame con columnas de hiperparámetros + 'val_auc'.
     """
-    # Grid por defecto si no se pasa ninguno
     if param_grid is None:
         param_grid = {
             'n_estimators': [100, 200, 300],
@@ -180,7 +214,6 @@ def train_xgboost_tuned(
             'reg_lambda':   [1, 10]
         }
     
-    # Split interno
     X_tr_sub, X_val, y_tr_sub, y_val = train_test_split(
         X_train, y_train,
         stratify=y_train,
@@ -193,35 +226,31 @@ def train_xgboost_tuned(
     records     = []
     
     for params in ParameterGrid(param_grid):
-        # instanciar el modelo
         model = XGBClassifier(
             use_label_encoder=False,
             eval_metric='logloss',
             random_state=random_state,
             **params
         )
-        # entrenar con early stopping
+        # Early stopping
         model.fit(
             X_tr_sub, y_tr_sub,
             eval_set=[(X_val, y_val)],
             early_stopping_rounds=early_stopping_rounds,
             verbose=False
         )
-        # predecir y medir AUC en validación
+        # AUC in validation
         y_pred = model.predict_proba(X_val)[:, 1]
         auc = roc_auc_score(y_val, y_pred)
         
-        # guardar resultado
         rec = params.copy()
         rec['val_auc'] = auc
         records.append(rec)
         
-        # actualizar mejor
         if auc > best_auc:
             best_auc   = auc
             best_model = model
     
-    # construir DataFrame con todos los resultados
     results_df = pd.DataFrame.from_records(records)
     results_df = results_df.sort_values('val_auc', ascending=False).reset_index(drop=True)
     

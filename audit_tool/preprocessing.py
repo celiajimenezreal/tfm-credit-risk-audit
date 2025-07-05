@@ -1,5 +1,41 @@
-# audit_tool/preprocessing.py
+"""
+audit_tool.preprocessing module
+--------------------------------
 
+Provides data loading, exploratory overview, missing value handling,
+outlier detection and treatment, variable distribution plotting,
+categorical encoding, date feature extraction, feature scaling, and
+feature selection utilities for machine learning preprocessing.
+
+Key Functions:
+    • load_data: Load CSV into DataFrame
+    • overview_data: Display dataset info and summary statistics
+    • check_missing_values: Identify and report missing data
+    • impute_missing_values: Fill missing values for numerical and categorical features
+    • detect_outliers / calculate_outlier_percentage: IQR-based outlier analysis
+    • treat_outliers: Cap or remove outliers
+    • winsorize_column(s): Winsorize specified columns
+    • plot_variable_distribution(s): Visualize distributions
+    • encode_categoricals / encode_mixed_categoricals: One-hot and ordinal encoding
+    • safe_extract_date_features: Extract year/month from date columns
+    • scale_features: Standardize numeric features
+    • save_processed_data: Export DataFrame to CSV
+    • get_numerical_and_categorical_columns: List feature types
+    • lasso_ridge_feature_selection: Select features via Lasso/Ridge regularization
+
+Dependencies:
+    • pandas
+    • numpy
+    • matplotlib
+    • scipy
+    • scikit-learn
+
+Author:
+    Celia Jiménez Real, University of Navarra – TFM Model Audit
+
+Date:
+    2025-07-05
+"""
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -115,7 +151,6 @@ def plot_multiple_distributions(df, columns, bins=50, n_cols=3, figsize=(15, 10)
         axes[i].set_title(col)
         axes[i].grid(True)
 
-    # Quitar subplots vacíos si sobran
     for j in range(i + 1, len(axes)):
         fig.delaxes(axes[j])
 

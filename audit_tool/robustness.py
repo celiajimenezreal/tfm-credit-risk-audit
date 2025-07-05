@@ -1,4 +1,49 @@
-# audit_tool/robustness.py
+"""
+audit_tool.robustness module
+----------------------------
+
+Provides functions to evaluate model robustness against various
+perturbations and adversarial attacks using the Adversarial Robustness
+Toolbox (ART). Includes utilities for loading models, generating
+adversarial examples (FGSM, PGD), adding noise, boundary testing,
+label flipping, safe prediction, and reporting results with confusion
+matrices.
+
+Key Functions:
+    • ensure_dir: Create directories if they do not exist
+    • load_model: Load and wrap models for ART attacks (Sklearn or XGBoost)
+    • apply_fgsm / apply_pgd: Generate adversarial samples with FGSM and PGD
+    • add_gaussian_noise: Inject Gaussian noise into inputs
+    • boundary_testing: Set features to min/max bounds randomly
+    • flip_labels: Randomly flip a fraction of labels
+    • safe_predict: Standardize prediction output format
+    • evaluate_and_plot: Compute metrics and save confusion matrix
+    • run_robustness_tests: Execute full suite of robustness evaluations
+
+Dependencies:
+    • numpy
+    • pandas
+    • matplotlib
+    • scikit-learn
+    • joblib
+    • adversarial-robustness-toolbox (art)
+
+Typical Usage:
+    from audit_tool.robustness import run_robustness_tests
+    run_robustness_tests(
+        model_name='xgb',
+        model_path='models/xgb.joblib',
+        model_type='xgb',
+        X=X_test.values,
+        y=y_test.values
+    )
+
+Author:
+    Celia Jiménez Real, University of Navarra – TFM Model Audit
+
+Date:
+    2025-07-05
+"""
 
 import os
 import numpy as np

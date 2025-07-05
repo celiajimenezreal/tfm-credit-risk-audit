@@ -1,4 +1,42 @@
-# audit_tool/explainability.py
+"""
+audit_tool.explainability module
+--------------------------------
+
+Provides utilities for model interpretability and explainability using
+SHAP and LIME. Includes functionality to compute SHAP values, plot
+SHAP summaries and waterfall plots, visualize feature importances for
+tree-based models, generate LIME explanations for individual instances,
+and produce an audit summary report.
+
+Dependencies:
+    • shap
+    • lime
+    • pandas
+    • numpy
+    • matplotlib
+    • scikit-learn
+    • xgboost
+    • lightgbm
+
+Typical Usage:
+    from audit_tool.explainability import (
+        compute_shap_values,
+        plot_shap_summary,
+        plot_model_feature_importance,
+        plot_shap_waterfall,
+        explain_instance_lime,
+        generate_audit_summary
+    )
+    shap_vals, X_num = compute_shap_values(model, X)
+    plot_shap_summary(shap_vals, X_num)
+    ...
+
+Author:
+    Celia Jiménez Real, University of Navarra – TFM Model Audit
+
+Date:
+    2025-07-05
+"""
 
 import shap
 import pandas as pd

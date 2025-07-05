@@ -1,4 +1,47 @@
-# reporting.py
+"""
+audit_tool.reporting module
+----------------------------
+
+Provides functions to generate comprehensive explainability and robustness
+reports for ML models. Utilizes SHAP, LIME, permutation importance, PDP,
+and adversarial robustness tests, and renders results into HTML templates.
+
+Key Components:
+    • report generation for explainability:
+        – SHAP summary and waterfall plots
+        – Feature importance, permutation importance, partial dependence
+        – LIME local explanations
+        – Outlier and VIF analysis
+        – Calibration check (Brier score)
+        – HTML report via Jinja2 templates
+    • report generation for robustness:
+        – FGSM and PGD adversarial attacks
+        – Gaussian noise injection, boundary testing, label flipping
+        – Confusion matrices and perturbation delta plots
+        – Aggregated metrics (accuracy, F1), conclusions and recommendations
+        – HTML report via Jinja2 templates
+
+Dependencies:
+    • pandas, numpy, matplotlib
+    • shap, lime
+    • scikit-learn, xgboost, lightgbm
+    • joblib
+    • jinja2
+    • adversarial-robustness-toolbox (ART)
+    • statsmodels (optional, for VIF)
+
+Typical Usage:
+    from audit_tool.reporting import generate_explainability_report, generate_robustness_report
+    generate_explainability_report( ...)
+    generate_robustness_report( ...)
+
+Author:
+    Celia Jiménez Real, University of Navarra – TFM Model Audit
+
+Date:
+    2025-07-05
+"""
+
 import os
 import base64
 import io
@@ -47,7 +90,7 @@ env = Environment(
 template = env.get_template(TEMPLATE_FILE)
 template_2 = env.get_template(TEMPLATE_FILE_2)
 
-# --- Utilidades ---
+# --- Utilities ---
 def plot_to_base64():
     buf = io.BytesIO()
     plt.tight_layout()
@@ -170,7 +213,7 @@ def generate_explainability_report(model_name, model, X_train, X_test, y_test, i
 
     lime_html = '\n<hr/>\n'.join(lime_html_parts)
 
-    # Comparación de rankings (SHAP vs FI vs Permutation)
+    # Ranking comparative (SHAP vs FI vs Permutation)
     comp_table = []
     if not fi_df.empty and not perm_df.empty:
         shap_rank = np.argsort(-mean_abs_shap)
@@ -186,10 +229,10 @@ def generate_explainability_report(model_name, model, X_train, X_test, y_test, i
                 'consistency': '✔️' if fi_rank.get(feat, 999) < 5 and perm_rank.get(feat, 999) < 5 else '⚠️'
             })
 
-    # Recomendaciones y Conclusiones
+    # Recommendations and Conclusions 
     recommendations, conclusions = [], []
 
-    # --- Análisis PDP ---
+    # --- PDP Analysis ---
     if pdp_img:
         conclusions.append(f'The Partial Dependence Plot (PDP) for "{top_feat}" illustrates its marginal effect on the model’s predictions.')
     else:
@@ -235,7 +278,7 @@ def generate_explainability_report(model_name, model, X_train, X_test, y_test, i
             if f in fi_rank and fi_rank[f] > 5:
                 conclusions.append(f'Permutation importance highlights "{f}" as influential, despite its lower ranking in model-based FI. Consider reassessing this variable.')
 
-    # --- Recomendaciones ---
+    # --- Recommendations ---
     suspicious_feats = [f for f in X_train.columns if any(kw.lower() in f.lower() for kw in ['id', 'key', 'number', 'rating', 'score', 'date'])]
     if suspicious_feats:
         recommendations.append('Potential data leakage risk: check variables ' + ', '.join(suspicious_feats) + '.')
@@ -260,9 +303,8 @@ def generate_explainability_report(model_name, model, X_train, X_test, y_test, i
             recommendations.append(f'{pct*100:.1f}% of values for "{feat}" are outliers (>3σ). Consider log-transforming or winsorizing.')
 
     # Render final report
-    # Verificaciones por ausencia de imágenes y mensajes alternativos
     if not fi_img:
-        fi_img = ''  # Asegurar variable válida
+        fi_img = '' 
         conclusions.append("Model does not expose built-in feature importance; this may limit interpretability.")
     if not perm_img:
         perm_img = ''
@@ -277,7 +319,6 @@ def generate_explainability_report(model_name, model, X_train, X_test, y_test, i
     if not lime_html:
         conclusions.append("LIME explanations could not be generated due to model or data constraints.")
 
-    # Conclusión adicional basada en número total de features relevantes
     if not fi_df.empty and len(fi_df) < 5:
         conclusions.append("Model relies heavily on a small set of variables. Consider assessing risk of overfitting or bias.")
 
@@ -288,7 +329,7 @@ def generate_explainability_report(model_name, model, X_train, X_test, y_test, i
         elif len(common_top_feats) <= 1:
             conclusions.append("Low agreement between FI and Permutation indicates unstable variable importance. Review model robustness.")
 
-    # Render final report (sin importar si se pudo generar cada parte)
+    # Render final report
     html = template.render(
         model_name=model_name,
         shap_summary_img=shap_summary_img,
@@ -353,27 +394,24 @@ def generate_robustness_report(model_name: str, model_path: str, model_type: str
             'recommendations': []
         }
 
-        # Solo generamos gráfico de perturbaciones si X fue modificado
         if name not in ["Baseline Performance", "Label Noise Simulation"]:
             delta_img, delta_df = plot_top_deltas(X, X_mod, name)
             test_entry['img_pert'] = delta_img
             test_entry['top_deltas'] = delta_df.head(5).to_dict(orient='records')
 
-            # Alta sensibilidad a alguna variable
+            # High sensibility in a variable
             if delta_df['mean_delta'].iloc[0] > 0.2:
                 msg = f"Model shows high sensitivity to feature: '{delta_df['feature'].iloc[0]}' during {name}."
                 conclusions.append(msg)
                 test_entry['conclusions'].append(msg)
 
-        # A partir de aquí, aplicamos diagnósticos a todo excepto baseline
+        # Diagnose everything except baseline model
         if name != "Baseline Performance":
-            # Degradación significativa de accuracy
             if base_acc is not None and acc < base_acc - 0.05:
                 msg = f"{name} significantly reduced accuracy (from {base_acc:.2f} to {acc:.2f})."
                 conclusions.append(msg)
                 test_entry['conclusions'].append(msg)
 
-            # F1-score completamente colapsado
             if f1 == 0.0:
                 msg = f"Model completely failed to identify any positive (risky) cases under {name}. F1-score dropped to 0."
                 conclusions.append(msg)
@@ -382,7 +420,6 @@ def generate_robustness_report(model_name: str, model_path: str, model_type: str
                 recommendations.append(rec)
                 test_entry['recommendations'].append(rec)
 
-            # Accuracy crítico
             if acc < 0.75:
                 rec = f"Accuracy under {name} is critically low ({acc:.2f}). Consider model retraining or improving data quality."
                 recommendations.append(rec)
